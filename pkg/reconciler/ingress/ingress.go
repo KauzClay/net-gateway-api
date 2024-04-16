@@ -171,18 +171,17 @@ func (c *Reconciler) determineLoadBalancerIngressStatus(gwc config.GatewayConfig
 		return []v1alpha1.LoadBalancerIngressStatus{
 			{DomainInternal: network.GetServiceHostname(namespacedNameService.Name, namespacedNameService.Namespace)},
 		}, nil
-	} else {
-		gw, err := c.gatewayLister.Gateways(gwc.Gateway.Namespace).Get(gwc.Gateway.Name)
-		if apierrs.IsNotFound(err) {
-			return nil, fmt.Errorf("Gateway %s does not exist: %w", gwc.Gateway.Name, err) //nolint:stylecheck
-		} else if err != nil {
-			return nil, err
-		}
-
-		return []v1alpha1.LoadBalancerIngressStatus{
-			{DomainInternal: gw.Status.Addresses[0].Value},
-		}, nil
 	}
+	gw, err := c.gatewayLister.Gateways(gwc.Gateway.Namespace).Get(gwc.Gateway.Name)
+	if apierrs.IsNotFound(err) {
+		return nil, fmt.Errorf("Gateway %s does not exist: %w", gwc.Gateway.Name, err) //nolint:stylecheck
+	} else if err != nil {
+		return nil, err
+	}
+
+	return []v1alpha1.LoadBalancerIngressStatus{
+		{DomainInternal: gw.Status.Addresses[0].Value},
+	}, nil
 }
 
 // isHTTPRouteReady will check the status conditions of the ingress and return true if
