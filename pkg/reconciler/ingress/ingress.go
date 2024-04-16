@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"knative.dev/net-gateway-api/pkg/reconciler/ingress/config"
@@ -139,14 +140,19 @@ func (c *Reconciler) reconcileIngress(ctx context.Context, ing *v1alpha1.Ingress
 	}
 
 	if ready {
-		namespacedNameService := gatewayConfig.Gateways[v1alpha1.IngressVisibilityExternalIP].Service
-		publicLbs := []v1alpha1.LoadBalancerIngressStatus{
-			{DomainInternal: network.GetServiceHostname(namespacedNameService.Name, namespacedNameService.Namespace)},
+		var publicLbs, privateLbs []v1alpha1.LoadBalancerIngressStatus
+
+		externalIPGatewayConfig := gatewayConfig.Gateways[v1alpha1.IngressVisibilityExternalIP]
+		internalIPGatewayConfig := gatewayConfig.Gateways[v1alpha1.IngressVisibilityClusterLocal]
+
+		publicLbs, err = c.determineLoadBalancerIngressStatus(externalIPGatewayConfig)
+		if err != nil {
+			return err
 		}
 
-		namespacedNameLocalService := gatewayConfig.Gateways[v1alpha1.IngressVisibilityClusterLocal].Service
-		privateLbs := []v1alpha1.LoadBalancerIngressStatus{
-			{DomainInternal: network.GetServiceHostname(namespacedNameLocalService.Name, namespacedNameLocalService.Namespace)},
+		privateLbs, err = c.determineLoadBalancerIngressStatus(internalIPGatewayConfig)
+		if err != nil {
+			return err
 		}
 
 		ing.Status.MarkLoadBalancerReady(publicLbs, privateLbs)
@@ -155,6 +161,28 @@ func (c *Reconciler) reconcileIngress(ctx context.Context, ing *v1alpha1.Ingress
 	}
 
 	return nil
+}
+
+// determineLoadBalancerIngressStatus will return the address for the Gateway.
+// If a service is provided, it will return the address of the service.
+// Otherwise, it will return the first address in the Gateway status.
+func (c *Reconciler) determineLoadBalancerIngressStatus(gwc config.GatewayConfig) ([]v1alpha1.LoadBalancerIngressStatus, error) {
+	if namespacedNameService := gwc.Service; namespacedNameService != nil {
+		return []v1alpha1.LoadBalancerIngressStatus{
+			{DomainInternal: network.GetServiceHostname(namespacedNameService.Name, namespacedNameService.Namespace)},
+		}, nil
+	} else {
+		gw, err := c.gatewayLister.Gateways(gwc.Gateway.Namespace).Get(gwc.Gateway.Name)
+		if apierrs.IsNotFound(err) {
+			return nil, fmt.Errorf("Gateway %s does not exist: %w", gwc.Gateway.Name, err) //nolint:stylecheck
+		} else if err != nil {
+			return nil, err
+		}
+
+		return []v1alpha1.LoadBalancerIngressStatus{
+			{DomainInternal: gw.Status.Addresses[0].Value},
+		}, nil
+	}
 }
 
 // isHTTPRouteReady will check the status conditions of the ingress and return true if

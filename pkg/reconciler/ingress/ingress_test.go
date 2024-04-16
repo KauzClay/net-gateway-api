@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	fakegwapiclientset "knative.dev/net-gateway-api/pkg/client/injection/client/fake"
 	"knative.dev/net-gateway-api/pkg/reconciler/ingress/config"
@@ -44,6 +45,7 @@ import (
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/network"
 
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayapi "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	. "knative.dev/net-gateway-api/pkg/reconciler/testing"
@@ -57,6 +59,9 @@ var (
 	privateSvc   = network.GetServiceHostname(privateName, testNamespace)
 
 	fakeStatusKey struct{}
+
+	publicGatewayAddress  = "11.22.33.44"
+	privateGatewayAddress = "55.66.77.88"
 )
 
 var (
@@ -474,6 +479,58 @@ func TestReconcileProbing(t *testing.T) {
 	}))
 }
 
+func TestReconcileProbingOffClusterGateway(t *testing.T) {
+	table := TableTest{
+		{
+			Name: "prober callback all endpoints ready",
+			Key:  "ns/name",
+			Ctx: withStatusManager(&fakeStatusManager{
+				FakeIsReady: func(context.Context, *v1alpha1.Ingress) (bool, error) {
+					return true, nil
+				},
+			}),
+			Objects: append([]runtime.Object{
+				ing(withBasicSpec, withGatewayAPIclass, withFinalizer, withInitialConditions),
+				httpRoute(t, ing(withBasicSpec, withGatewayAPIclass), httpRouteReady),
+				gw(defaultListener, setStatusPublicAddress),
+				gw(privateGw, defaultListener, setStatusPrivateAddress),
+			}, servicesAndEndpoints...),
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{
+				{Object: ing(withBasicSpec, withGatewayAPIclass, withFinalizer, makeItReadyOffClusterGateway)},
+			},
+		},
+	}
+
+	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
+		statusManager := ctx.Value(fakeStatusKey).(status.Manager)
+		r := &Reconciler{
+			gwapiclient: fakegwapiclientset.Get(ctx),
+			// Listers index properties about resources
+			httprouteLister: listers.GetHTTPRouteLister(),
+			gatewayLister:   listers.GetGatewayLister(),
+			statusManager:   statusManager,
+		}
+		return ingressreconciler.NewReconciler(ctx, logging.FromContext(ctx), fakeingressclient.Get(ctx),
+			listers.GetIngressLister(), controller.GetEventRecorder(ctx), r, gatewayAPIIngressClassName,
+			controller.Options{
+				ConfigStore: &testConfigStore{
+					config: configNoService,
+				}})
+	}))
+}
+
+func makeItReadyOffClusterGateway(i *v1alpha1.Ingress) {
+	i.Status.InitializeConditions()
+	i.Status.MarkNetworkConfigured()
+	i.Status.MarkLoadBalancerReady(
+		[]v1alpha1.LoadBalancerIngressStatus{{
+			DomainInternal: publicGatewayAddress,
+		}},
+		[]v1alpha1.LoadBalancerIngressStatus{{
+			DomainInternal: privateGatewayAddress,
+		}})
+}
+
 func makeItReady(i *v1alpha1.Ingress) {
 	i.Status.InitializeConditions()
 	i.Status.MarkNetworkConfigured()
@@ -569,6 +626,24 @@ func defaultListener(g *gatewayapi.Gateway) {
 		Name:     "http",
 		Port:     80,
 		Protocol: "HTTP",
+	})
+}
+
+func privateGw(g *gatewayapi.Gateway) {
+	g.Name = privateName
+}
+
+func setStatusPrivateAddress(g *gatewayapi.Gateway) {
+	g.Status.Addresses = append(g.Status.Addresses, gatewayapiv1.GatewayStatusAddress{
+		Type:  ptr.To[gatewayapiv1.AddressType](gatewayapiv1.IPAddressType),
+		Value: privateGatewayAddress,
+	})
+}
+
+func setStatusPublicAddress(g *gatewayapi.Gateway) {
+	g.Status.Addresses = append(g.Status.Addresses, gatewayapiv1.GatewayStatusAddress{
+		Type:  ptr.To[gatewayapiv1.AddressType](gatewayapiv1.IPAddressType),
+		Value: publicGatewayAddress,
 	})
 }
 
@@ -675,6 +750,20 @@ var (
 				},
 				v1alpha1.IngressVisibilityClusterLocal: {
 					Service: &types.NamespacedName{Namespace: "istio-system", Name: "knative-local-gateway"},
+					Gateway: &types.NamespacedName{Namespace: "istio-system", Name: "knative-local-gateway"},
+				},
+			},
+		},
+	}
+
+	configNoService = &config.Config{
+		Network: &networkcfg.Config{},
+		Gateway: &config.Gateway{
+			Gateways: map[v1alpha1.IngressVisibility]config.GatewayConfig{
+				v1alpha1.IngressVisibilityExternalIP: {
+					Gateway: &types.NamespacedName{Namespace: "istio-system", Name: "istio-gateway"},
+				},
+				v1alpha1.IngressVisibilityClusterLocal: {
 					Gateway: &types.NamespacedName{Namespace: "istio-system", Name: "knative-local-gateway"},
 				},
 			},
